@@ -1,8 +1,7 @@
-# File Path: C:\Users\Public\fixed_timer.py
-# Description: 再設定バグ修正済み・堅牢タイマー
-# Author: Gemini (Bug fixed version)
+#SimpleTimer.py
 
 import tkinter as tk
+from tkinter import ttk
 from tkinter import messagebox
 import threading
 import time
@@ -10,83 +9,203 @@ import winsound
 import datetime
 import re
 import sys
+import os
 
-class RobustTimer:
+# 外部ライブラリのインポートチェック
+try:
+    import pystray
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError as e:
+    root = tk.Tk()
+    root.withdraw()
+    messagebox.showerror("ライブラリ不足", f"起動に必要なライブラリが見つかりません。\n以下のコマンドを実行してください:\n\npip install pystray Pillow\n\nエラー詳細: {e}")
+    sys.exit(1)
+
+def resource_path(relative_path):
+    """EXE化対応：リソースパスの解決"""
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+class SimpleTimer:
     def __init__(self, root):
         self.root = root
-        self.root.title("確実なタイマー（修正版）")
+        self.root.title("SimpleTimer")
         
-        # ウィンドウ初期サイズ
-        self.default_width = 500
-        self.default_height = 400
-        self._center_window(self.default_width, self.default_height)
+        # アイコンファイルの読み込み
+        self.icon_file = resource_path("timer.ico")
+        if os.path.exists(self.icon_file):
+            try:
+                self.root.iconbitmap(default=self.icon_file)
+            except: pass
+
+        # ウィンドウ設定
+        self.root.attributes("-topmost", True)
+        self.root.minsize(350, 240)
         
-        # 状態管理変数
+        # 状態変数
         self.is_running = False
         self.target_datetime = None
         self.task_name = ""
         self.is_alarming = False
         self.log_file = "timer_log.txt"
+        
+        # 設定変数
         self.sound_enabled = tk.BooleanVar(value=True)
+        self.opacity_val = tk.DoubleVar(value=0.6) 
+        self.sound_pattern = tk.StringVar(value="ブザー(標準)")
+        
+        # トレイアイコン関連
+        self.tray_icon = None
+        self.icon_thread = None
+        self.is_quitting = False 
 
         # 色設定
-        self.COLOR_NORMAL = "#FFFFFF" 
+        self.COLOR_NORMAL = "#f0f0f0" 
         self.COLOR_WARN = "#FF6347"   
+        self.COLOR_SAFE_ICON = "#228B22" 
+        self.COLOR_WARN_ICON = "#DC143C"
+        self.COLOR_IDLE_ICON = "#808080"
 
-        # GUI構成
-        self._setup_ui()
+        # GUI構築
+        self._setup_structure()
+        self._switch_ui_to_idle()
+        self._center_window_initial()
 
-    def _center_window(self, width, height):
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_window)
+        self._init_tray_icon()
+
+    def _center_window_initial(self):
+        self.root.update_idletasks()
+        width = self.root.winfo_reqwidth()
+        height = self.root.winfo_reqheight()
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
         x = (screen_width // 2) - (width // 2)
         y = (screen_height // 2) - (height // 2)
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.geometry(f"+{x}+{y}")
 
-    def _setup_ui(self):
-        # メインフレーム
-        self.main_frame = tk.Frame(self.root, padx=30, pady=30)
-        self.main_frame.pack(expand=True, fill="both")
+    def _setup_structure(self):
+        # 固定エリア（入力フォーム等）
+        self.static_frame = tk.Frame(self.root, padx=10, pady=10)
+        self.static_frame.pack(fill="x")
 
-        # 1. 用件入力エリア
-        tk.Label(self.main_frame, text="用件:", font=("Meiryo UI", 12)).pack(anchor="w")
-        self.entry_task = tk.Entry(self.main_frame, width=40, font=("Meiryo UI", 12))
+        # 用件
+        row1 = tk.Frame(self.static_frame)
+        row1.pack(fill="x", pady=(0, 5))
+        tk.Label(row1, text="用件:", font=("Meiryo UI", 10)).pack(side="left")
+        self.entry_task = tk.Entry(row1, font=("Meiryo UI", 10))
         self.entry_task.insert(0, "作業")
-        self.entry_task.pack(pady=(0, 15), fill="x")
+        self.entry_task.pack(side="left", padx=5, fill="x", expand=True)
 
-        # 2. 時間入力エリア
-        tk.Label(self.main_frame, text="終了時刻 (例: 1430 または 14:30):", font=("Meiryo UI", 12)).pack(anchor="w")
-        time_control_frame = tk.Frame(self.main_frame)
-        time_control_frame.pack(fill="x", pady=(0, 20))
-        
-        self.entry_time = tk.Entry(time_control_frame, width=15, font=("Meiryo UI", 18))
+        # 時間
+        row2 = tk.Frame(self.static_frame)
+        row2.pack(fill="x", pady=(0, 5))
+        tk.Label(row2, text="終了時刻:", font=("Meiryo UI", 10)).pack(side="left")
+        self.entry_time = tk.Entry(row2, width=8, font=("Meiryo UI", 14))
         self.entry_time.insert(0, datetime.datetime.now().strftime("%H:%M"))
-        self.entry_time.pack(side="left", padx=(0, 20))
+        self.entry_time.pack(side="left", padx=5)
+        tk.Label(row2, text="(例 1430)", font=("Meiryo UI", 9), fg="gray").pack(side="left")
 
-        self.chk_sound = tk.Checkbutton(time_control_frame, text="通知音を鳴らす", 
-                                      variable=self.sound_enabled, font=("Meiryo UI", 11))
+        # オプション
+        opt_frame = tk.Frame(self.static_frame)
+        opt_frame.pack(fill="x", pady=(5, 0))
+        
+        sound_frame = tk.LabelFrame(opt_frame, text="通知音設定", font=("Meiryo UI", 8), padx=5, pady=2)
+        sound_frame.pack(fill="x", pady=(0, 5))
+        
+        self.chk_sound = tk.Checkbutton(sound_frame, text="ON", variable=self.sound_enabled, font=("Meiryo UI", 9))
         self.chk_sound.pack(side="left")
 
-        # 3. ボタンエリア（フレームで場所を確保）
-        self.button_frame = tk.Frame(self.main_frame, height=60)
-        self.button_frame.pack(fill="x", pady=10)
-        self.button_frame.pack_propagate(False) # 高さを固定してレイアウト崩れを防ぐ
+        self.combo_sound = ttk.Combobox(sound_frame, textvariable=self.sound_pattern, 
+                                      values=["ブザー(標準)", "低音(控えめ)", "Windows通知", "アラーム(ピッピッ)",
+                                              "レトロ(テレレレ♪)", "駅メロ(SH-1風)", "水滴(ピロリロ)"], 
+                                      state="readonly", width=16, font=("Meiryo UI", 9))
+        self.combo_sound.pack(side="left", padx=5)
 
-        self.btn_start = tk.Button(self.button_frame, text="タイマーセット", 
-                                 command=self.start_timer, 
-                                 bg="#e1e1e1", font=("Meiryo UI", 14, "bold"))
-        self.btn_start.pack(fill="both", expand=True)
+        alpha_frame = tk.Frame(opt_frame)
+        alpha_frame.pack(fill="x")
+        tk.Label(alpha_frame, text="透過:", font=("Meiryo UI", 9)).pack(side="left")
+        self.scale_opacity = tk.Scale(alpha_frame, variable=self.opacity_val, from_=0.1, to=1.0, 
+                                    resolution=0.1, orient="horizontal", showvalue=0, length=100,
+                                    command=self._on_opacity_change)
+        self.scale_opacity.pack(side="left")
+        tk.Label(alpha_frame, text="(右=濃)", font=("Meiryo UI", 8), fg="gray").pack(side="left")
 
-        # 4. 情報表示エリア
-        self.info_frame = tk.Frame(self.main_frame)
-        self.info_frame.pack(fill="both", expand=True, pady=10)
+        # 可変エリア（ボタン・カウントダウン表示）
+        self.dynamic_frame = tk.Frame(self.root, padx=10) 
+        self.dynamic_frame.pack(fill="both", expand=True, pady=(0, 10))
 
-        self.lbl_info = tk.Label(self.info_frame, text="", font=("Meiryo UI", 14))
-        self.lbl_countdown = tk.Label(self.info_frame, text="", font=("Meiryo UI", 28, "bold"), fg="#333333")
+    # --- UI切り替え ---
+    def _clear_dynamic_area(self):
+        for widget in self.dynamic_frame.winfo_children(): widget.destroy()
+    
+    def _autosize_window(self):
+        self.root.geometry("") 
+
+    def _switch_ui_to_idle(self):
+        self._clear_dynamic_area()
+        self.entry_task.config(state="normal")
+        self.entry_time.config(state="normal")
+        self.chk_sound.config(state="normal")
+        self.combo_sound.config(state="readonly")
         
-        self.btn_cancel = tk.Button(self.info_frame, text="設定解除", 
-                                  command=self.reset_timer, bg="#ffdddd", font=("Meiryo UI", 10))
+        btn = tk.Button(self.dynamic_frame, text="タイマー開始", command=self.start_timer, 
+                        bg="#e1e1e1", font=("Meiryo UI", 12, "bold"), pady=5)
+        btn.pack(fill="x", pady=10)
+        
+        if self.tray_icon:
+            self.tray_icon.icon = self._get_idle_icon_image()
+            self.tray_icon.title = "待機中"
+        self._autosize_window()
 
+    def _switch_ui_to_running(self):
+        self._clear_dynamic_area()
+        self.entry_task.config(state="disabled")
+        self.entry_time.config(state="disabled")
+        self.chk_sound.config(state="disabled")
+        self.combo_sound.config(state="disabled")
+        
+        day_offset_str = "明日" if self.target_datetime.day != datetime.datetime.now().day else "今日"
+        target_str = self.target_datetime.strftime("%H:%M")
+        
+        lbl_info = tk.Label(self.dynamic_frame, text=f"予定: {self.task_name}\n目標: {day_offset_str} {target_str}", font=("Meiryo UI", 11))
+        lbl_info.pack(pady=5)
+        
+        self.lbl_countdown = tk.Label(self.dynamic_frame, text="--:--:--", font=("Meiryo UI", 24, "bold"), fg="#333333")
+        self.lbl_countdown.pack(pady=5)
+        
+        btn_cancel = tk.Button(self.dynamic_frame, text="停止・解除", command=self.reset_timer, bg="#ffdddd", font=("Meiryo UI", 10))
+        btn_cancel.pack(fill="x", pady=5)
+        
+        self.root.attributes("-alpha", self.opacity_val.get())
+        self._autosize_window()
+
+    def _trigger_alarm_ui(self):
+        self.root.deiconify()
+        self.root.attributes("-topmost", True)
+        self.root.attributes("-alpha", 1.0)
+        self.root.focus_force()
+
+        self.static_frame.pack_forget()
+        self.dynamic_frame.pack_forget()
+        
+        self.alarm_frame = tk.Frame(self.root, bg=self.COLOR_WARN)
+        self.alarm_frame.pack(expand=True, fill="both")
+
+        tk.Label(self.alarm_frame, text="Time's Up!", font=("Meiryo UI", 16), bg=self.COLOR_WARN).pack(pady=(30, 5))
+        tk.Label(self.alarm_frame, text=self.task_name, font=("Meiryo UI", 24, "bold"), bg=self.COLOR_WARN, wraplength=300).pack(pady=5)
+
+        btn_stop = tk.Button(self.alarm_frame, text="停止 (Enter)", font=("Meiryo UI", 14, "bold"),
+                           command=self.stop_alarm, width=15, bg="#ffffff")
+        btn_stop.pack(pady=20)
+        btn_stop.focus_set()
+        self.root.bind('<Return>', lambda e: self.stop_alarm())
+        self._autosize_window()
+
+    # --- タイマーロジック ---
     def _parse_time_input(self, time_str):
         time_str = time_str.translate(str.maketrans({chr(0xFF10 + i): chr(0x30 + i) for i in range(10)}))
         time_str = time_str.strip()
@@ -101,53 +220,36 @@ class RobustTimer:
     def start_timer(self):
         try:
             hour, minute = self._parse_time_input(self.entry_time.get())
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError("時刻範囲外")
+            if not (0 <= hour <= 23 and 0 <= minute <= 59): raise ValueError("時刻範囲外")
 
             self.task_name = self.entry_task.get()
             now = datetime.datetime.now()
             target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            
-            day_offset_str = "今日"
-            if target <= now:
-                target += datetime.timedelta(days=1)
-                day_offset_str = "明日"
+            if target <= now: target += datetime.timedelta(days=1)
 
             self.target_datetime = target
-            
-            # UI切り替え
-            self.entry_task.config(state="disabled")
-            self.entry_time.config(state="disabled")
-            self.chk_sound.config(state="disabled")
-            
-            self.btn_start.pack_forget() # ボタンを隠す
-            
-            self.lbl_info.config(text=f"予定: {self.task_name}\n目標: {day_offset_str} {hour:02d}:{minute:02d}")
-            self.lbl_info.pack(pady=5)
-            self.lbl_countdown.pack(pady=10)
-            self.btn_cancel.pack(fill="x", pady=5)
-            
             self.is_running = True
+            self._switch_ui_to_running()
             self._update_countdown_loop()
-            
-        except ValueError:
-            messagebox.showerror("入力エラー", "時刻を正しく入力してください（例: 1430）")
-        except Exception as e:
-            messagebox.showerror("エラー", f"予期せぬエラー: {e}")
+        except ValueError: messagebox.showerror("入力エラー", "時刻を正しく入力してください（例: 1430）")
+        except Exception as e: messagebox.showerror("エラー", f"予期せぬエラー: {e}")
 
     def _update_countdown_loop(self):
         if not self.is_running: return
         now = datetime.datetime.now()
         remaining = self.target_datetime - now
-        total_seconds = int(remaining.total_seconds())
+        total_seconds = remaining.total_seconds()
 
+        if total_seconds > 0: self._update_tray_status(total_seconds)
         if total_seconds <= 0:
             self.lbl_countdown.config(text="00:00:00")
+            self._update_tray_status(0)
             self._trigger_alarm()
         else:
-            h, rem = divmod(total_seconds, 3600)
+            safe_seconds = int(max(0, total_seconds))
+            h, rem = divmod(safe_seconds, 3600)
             m, s = divmod(rem, 60)
-            time_str = f"あと {h}時間 {m:02d}分 {s:02d}秒" if h > 0 else f"あと {m}分 {s:02d}秒"
+            time_str = f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
             self.lbl_countdown.config(text=time_str)
             self.root.after(200, self._update_countdown_loop)
 
@@ -155,94 +257,154 @@ class RobustTimer:
         self.is_running = False
         self.is_alarming = True
         self._write_log()
-
-        self.root.deiconify()
-        self.root.attributes("-topmost", True)
-        self.root.focus_force()
-        
-        self.main_frame.pack_forget()
-        self.alarm_frame = tk.Frame(self.root, bg=self.COLOR_WARN)
-        self.alarm_frame.pack(expand=True, fill="both")
-
-        tk.Label(self.alarm_frame, text=f"時間になりました", 
-                 font=("Meiryo UI", 20), bg=self.COLOR_WARN).pack(pady=(60, 10))
-        tk.Label(self.alarm_frame, text=self.task_name, 
-                 font=("Meiryo UI", 36, "bold"), bg=self.COLOR_WARN).pack(pady=10)
-
-        btn_frame = tk.Frame(self.alarm_frame, bg=self.COLOR_WARN)
-        btn_frame.pack(pady=40)
-        
-        self.btn_stop = tk.Button(btn_frame, text="確認・停止 (Enter)", font=("Meiryo UI", 16, "bold"),
-                  command=self.stop_alarm, width=20, height=2, bg="#ffffff")
-        self.btn_stop.pack()
-        self.btn_stop.focus_set()
-
-        self.root.bind('<Return>', lambda e: self.stop_alarm())
-
+        self._trigger_alarm_ui()
         self._start_flashing()
-        if self.sound_enabled.get():
-            threading.Thread(target=self._sound_loop, daemon=True).start()
+        if self.sound_enabled.get(): threading.Thread(target=self._sound_loop, daemon=True).start()
+
+    def stop_alarm(self):
+        self.is_alarming = False
+        self.root.unbind('<Return>')
+        if hasattr(self, 'alarm_frame'): self.alarm_frame.destroy()
+        self.static_frame.pack(fill="x")
+        self.dynamic_frame.pack(fill="both", expand=True, pady=(0, 10))
+        self.root.attributes("-alpha", 1.0)
+        self._switch_ui_to_idle()
+
+    def reset_timer(self):
+        self.is_running = False
+        self.root.attributes("-alpha", 1.0)
+        self._switch_ui_to_idle()
+
+    # --- サウンド ---
+    def _sound_loop(self):
+        pattern = self.sound_pattern.get()
+        while self.is_alarming:
+            if "ブザー" in pattern: winsound.Beep(880, 400); self._wait_with_check(0.4)
+            elif "低音" in pattern: winsound.Beep(440, 300); self._wait_with_check(0.5)
+            elif "Windows" in pattern: winsound.MessageBeep(winsound.MB_ICONASTERISK); self._wait_with_check(1.0)
+            elif "アラーム" in pattern:
+                winsound.Beep(1000, 50); self._wait_with_check(0.1)
+                if not self.is_alarming: break
+                winsound.Beep(1000, 50); self._wait_with_check(0.8)
+            elif "レトロ" in pattern:
+                for note in [523, 659, 784, 1047]:
+                    if not self.is_alarming: break
+                    winsound.Beep(note, 100)
+                self._wait_with_check(1.0)
+            elif "駅メロ" in pattern:
+                for note in [523, 659, 784, 1047, 1319, 1568]:
+                    if not self.is_alarming: break
+                    winsound.Beep(note, 120)
+                self._wait_with_check(1.5)
+            elif "水滴" in pattern:
+                for freq, dur in [(1568, 100), (1480, 100), (1319, 100), (1175, 100), (1047, 400)]:
+                    if not self.is_alarming: break
+                    winsound.Beep(freq, dur)
+                self._wait_with_check(2.0)
+            else: winsound.Beep(880, 400); self._wait_with_check(0.4)
+
+    def _wait_with_check(self, seconds):
+        start = time.time()
+        while time.time() - start < seconds:
+            if not self.is_alarming: return
+            time.sleep(0.05)
 
     def _start_flashing(self):
         if not self.is_alarming: return
-        current_bg = self.alarm_frame.cget("bg")
-        next_bg = self.COLOR_NORMAL if current_bg == self.COLOR_WARN else self.COLOR_WARN
         try:
+            current_bg = self.alarm_frame.cget("bg")
+            next_bg = self.COLOR_NORMAL if current_bg == self.COLOR_WARN else self.COLOR_WARN
+            if self.tray_icon:
+                icon_bg = self.COLOR_WARN_ICON if next_bg == self.COLOR_WARN else self.COLOR_SAFE_ICON
+                try: self.tray_icon.icon = self._create_icon_image("!!", icon_bg)
+                except: pass
             self.alarm_frame.config(bg=next_bg)
             for child in self.alarm_frame.winfo_children():
                 if isinstance(child, (tk.Label, tk.Frame)): child.config(bg=next_bg)
+            self.root.after(500, self._start_flashing)
         except: return
-        self.root.after(500, self._start_flashing)
-
-    def _sound_loop(self):
-        while self.is_alarming:
-            winsound.Beep(880, 400) 
-            time.sleep(0.4) 
-
-    def stop_alarm(self, snooze=False):
-        self.is_alarming = False
-        self.root.unbind('<Return>')
-        self.root.attributes("-topmost", False)
-        if hasattr(self, 'alarm_frame'): self.alarm_frame.destroy()
-        
-        self.main_frame.pack(expand=True, fill="both")
-        
-        # 表示のリセット
-        self.lbl_info.pack_forget()
-        self.lbl_countdown.pack_forget()
-        self.btn_cancel.pack_forget()
-        
-        # スタートボタンを元の位置（button_frame内）に再表示
-        self.btn_start.pack(fill="both", expand=True)
-        
-        self.entry_task.config(state="normal")
-        self.entry_time.config(state="normal")
-        self.chk_sound.config(state="normal")
-        self.entry_task.focus_set()
-
-    def reset_timer(self):
-        """カウントダウン中のキャンセル処理"""
-        self.is_running = False
-        # 通常のstop_alarmと同じ処理を行うが、画面サイズ等は維持
-        self.lbl_info.pack_forget()
-        self.lbl_countdown.pack_forget()
-        self.btn_cancel.pack_forget()
-        
-        self.btn_start.pack(fill="both", expand=True)
-        
-        self.entry_task.config(state="normal")
-        self.entry_time.config(state="normal")
-        self.chk_sound.config(state="normal")
 
     def _write_log(self):
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        target_str = self.target_datetime.strftime("%Y-%m-%d %H:%M:%S")
         try:
             with open(self.log_file, "a", encoding="utf-8") as f:
-                f.write(f"[{now_str}] 完了: {self.task_name} (目標: {target_str})\n")
+                f.write(f"[{now_str}] 完了: {self.task_name} (目標: {self.target_datetime})\n")
         except: pass
+
+    def _on_opacity_change(self, value):
+        if self.is_running:
+            try: self.root.attributes("-alpha", float(value))
+            except: pass
+
+    # --- トレイアイコン ---
+    def _init_tray_icon(self):
+        image = self._get_idle_icon_image()
+        menu = pystray.Menu(pystray.MenuItem("開く", self._show_window), pystray.MenuItem("終了", self._quit_app))
+        self.tray_icon = pystray.Icon("SimpleTimer", image, "待機中", menu)
+        self.icon_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+        self.icon_thread.start()
+
+    def _get_idle_icon_image(self):
+        if os.path.exists(self.icon_file):
+            try: return Image.open(self.icon_file)
+            except: pass
+        return self._create_clock_icon()
+
+    def _create_clock_icon(self):
+        width, height = 64, 64
+        image = Image.new('RGB', (width, height), color=self.COLOR_IDLE_ICON)
+        draw = ImageDraw.Draw(image)
+        margin = 8
+        draw.ellipse((margin, margin, width-margin, height-margin), outline="white", width=3)
+        cx, cy = width // 2, height // 2
+        draw.line((cx, cy, cx - 10, cy - 10), fill="white", width=4)
+        draw.line((cx, cy, cx + 15, cy - 15), fill="white", width=3)
+        return image
+
+    def _create_icon_image(self, text, bg_color):
+        width, height = 64, 64
+        image = Image.new('RGB', (width, height), color=bg_color)
+        draw = ImageDraw.Draw(image)
+        font_size = 40
+        try: font = ImageFont.truetype("arialbd.ttf", font_size)
+        except: font = ImageFont.load_default()
+        
+        # [修正] ここが原因で表示されなくなっていました
+        try:
+            left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+            text_width = right - left
+            text_height = bottom - top
+        except AttributeError:
+            text_width, text_height = draw.textsize(text, font=font)
+            
+        draw.text(((width - text_width) // 2, (height - text_height) // 2), text, font=font, fill="white")
+        return image
+
+    def _update_tray_status(self, remaining_seconds):
+        if self.tray_icon is None or self.is_quitting: return
+        bg_color = self.COLOR_WARN_ICON if remaining_seconds <= 300 else self.COLOR_SAFE_ICON
+        if remaining_seconds > 60:
+            m = int(remaining_seconds // 60)
+            txt = "99+" if m >= 100 else str(m)
+            tooltip = f"あと {m}分"
+        else:
+            s = int(remaining_seconds)
+            txt = str(s)
+            tooltip = f"あと {s}秒"
+        try:
+            self.tray_icon.icon = self._create_icon_image(txt, bg_color)
+            self.tray_icon.title = tooltip
+        except: pass
+
+    def _on_close_window(self): self.root.withdraw()
+    def _show_window(self, icon=None, item=None):
+        self.root.after(0, self.root.deiconify); self.root.after(0, self.root.lift); self.root.after(0, self.root.focus_force)
+    def _quit_app(self, icon=None, item=None):
+        self.is_quitting = True; self.is_running = False
+        if self.tray_icon: self.tray_icon.stop()
+        self.root.after(0, self.root.destroy); self.root.after(0, sys.exit)
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = RobustTimer(root)
+    app = SimpleTimer(root)
     root.mainloop()
